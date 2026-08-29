@@ -38,8 +38,18 @@ os.makedirs(DB_DIR, exist_ok=True)
 BACKEND = config.DB_BACKEND  # "sqlite" or "postgres"
 
 if BACKEND == "postgres":
-    import psycopg2
-    import psycopg2.extras
+    try:
+        import psycopg2
+        import psycopg2.extras
+    except ImportError as exc:
+        raise ImportError(
+            "DB_BACKEND is set to 'postgres' but the 'psycopg2-binary' package "
+            "is not installed in this environment. On Streamlit Community "
+            "Cloud: confirm requirements.txt (in the repo root) contains "
+            "'psycopg2-binary>=2.9.9', then use 'Manage app' -> the ⋮ menu -> "
+            "'Reboot app' to force a clean reinstall of dependencies. "
+            "Locally: run 'pip install -r requirements.txt' again."
+        ) from exc
 else:
     import sqlite3
 
