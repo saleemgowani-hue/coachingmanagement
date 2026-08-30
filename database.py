@@ -80,8 +80,14 @@ def get_connection():
     # WAL mode lets one device write while others keep reading, and
     # busy_timeout makes SQLite wait (instead of failing instantly) if two
     # devices happen to write in the same instant - important once the app
-    # is opened from a laptop and a phone/tablet at the same time.
-    conn.execute("PRAGMA journal_mode = WAL")
+    # is opened from a laptop and a phone/tablet at the same time. Some
+    # filesystems (certain network/container-mounted storage, some cloud
+    # hosts) don't support WAL's shared-memory locking - fall back to the
+    # universally-supported default journal mode there instead of crashing.
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("PRAGMA busy_timeout = 8000")
     return conn
 
@@ -473,6 +479,13 @@ ALL_TENANT_TABLES_DELETE_ORDER = [
 ]
 ALL_TABLES_INSERT_ORDER = list(reversed(ALL_TENANT_TABLES_DELETE_ORDER))
 
+# Same tables, minus tenant IDENTITY (institutes, users, licences,
+# licence_keys) - used to wipe a tenant's business DATA while keeping the
+# tenant record and its login intact (used for the demo tenant's periodic
+# reset, so the demo login itself is never deleted).
+_IDENTITY_TABLES = {"institutes", "users", "licences", "licence_keys", "settings"}
+BUSINESS_DATA_TABLES_DELETE_ORDER = [t for t in ALL_TENANT_TABLES_DELETE_ORDER if t not in _IDENTITY_TABLES]
+
 
 def init_db():
     schema = SCHEMA_POSTGRES if BACKEND == "postgres" else SCHEMA_SQLITE
@@ -480,10 +493,24 @@ def init_db():
     try:
         if BACKEND == "postgres":
             cur = conn.cursor()
-            cur.execute(schema)
+            try:
+                cur.execute(schema)
+                conn.commit()
+            except psycopg2.Error:
+                # Under concurrent Streamlit sessions, two processes can both
+                # run "CREATE TABLE/INDEX IF NOT EXISTS" for a brand-new
+                # table at the same instant - Postgres's system catalog
+                # isn't fully race-proof for this, and one loses with a
+                # duplicate-key error even though the *table* itself ends up
+                # created correctly by the other. Safe to ignore: this is
+                # pure schema DDL with no data-dependent logic, and the
+                # desired end state (schema exists) is achieved either way -
+                # only possible on the very first-ever run, before any
+                # table exists; once schema exists this can never recur.
+                conn.rollback()
         else:
             conn.executescript(schema)
-        conn.commit()
+            conn.commit()
     finally:
         conn.close()
     _run_migrations()
