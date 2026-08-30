@@ -1,5 +1,13 @@
 /* SN COACHING MANAGEMENT SYSTEM - custom theme */
 
+/* Tells the browser this page is explicitly designed for light mode, so
+   Android/Chrome's own "force dark" accessibility feature doesn't try to
+   auto-invert/adjust colors on top of our custom palette - that clash is
+   what causes near-invisible low-contrast text on some phones. */
+:root {
+    color-scheme: light only;
+}
+
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 
