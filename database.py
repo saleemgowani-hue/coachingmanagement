@@ -41,6 +41,7 @@ if BACKEND == "postgres":
     try:
         import psycopg2
         import psycopg2.extras
+        import psycopg2.pool
     except ImportError as exc:
         raise ImportError(
             "DB_BACKEND is set to 'postgres' but the 'psycopg2-binary' package "
@@ -64,15 +65,44 @@ def _prep(sql: str) -> str:
     return sql
 
 
-def get_connection():
-    if BACKEND == "postgres":
+# ---------------------------------------------------------------------
+# Connection handling
+#
+# SQLite: a fresh connection is opened per call - this is genuinely cheap
+# (local file I/O, no handshake), exactly as before.
+#
+# Postgres: connections are checked out from a persistent pool instead of
+# opened fresh each time. Opening a brand-new authenticated TLS connection
+# to a REMOTE database for every single query is the single biggest cause
+# of slowness once this app talks to a real network-hosted Postgres host
+# (e.g. Neon) rather than a local SQLite file - a typical page here issues
+# dozens of small queries, and paying a full TCP+TLS+auth handshake for
+# every one of them adds up to seconds of pure connection overhead before
+# any actual query work happens. Reusing pooled connections eliminates
+# nearly all of that overhead on the common path.
+# ---------------------------------------------------------------------
+_pg_pool = None
+
+
+def _get_pg_pool():
+    global _pg_pool
+    if _pg_pool is None:
         if not config.DATABASE_URL:
             raise RuntimeError(
                 "DB_BACKEND is 'postgres' but DATABASE_URL is not set. "
                 "Set it via environment variable or Streamlit secrets."
             )
-        conn = psycopg2.connect(config.DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
-        return conn
+        _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=1, maxconn=10,
+            dsn=config.DATABASE_URL,
+            cursor_factory=psycopg2.extras.RealDictCursor,
+        )
+    return _pg_pool
+
+
+def get_connection():
+    if BACKEND == "postgres":
+        return _get_pg_pool().getconn()
 
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
@@ -92,16 +122,37 @@ def get_connection():
     return conn
 
 
+def _release_connection(conn, broken: bool = False):
+    """Returns a connection after use. For Postgres, `broken=True` closes
+    and discards it instead of returning it to the pool - used when a
+    pooled connection turned out to be dead (e.g. closed server-side after
+    sitting idle), so a bad connection is never handed out again."""
+    if BACKEND == "postgres":
+        _get_pg_pool().putconn(conn, close=broken)
+    else:
+        conn.close()
+
+
+def _is_stale_connection_error(exc) -> bool:
+    if BACKEND != "postgres":
+        return False
+    return isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
+
+
 @contextmanager
 def db_cursor(commit=False):
     conn = get_connection()
+    broken = False
     try:
         cur = conn.cursor()
         yield cur
         if commit:
             conn.commit()
+    except Exception:
+        broken = True  # don't return a connection to the pool mid-error - safer to discard and reconnect
+        raise
     finally:
-        conn.close()
+        _release_connection(conn, broken=broken)
 
 
 def _normalize_row(row: dict) -> dict:
@@ -119,23 +170,56 @@ def _normalize_row(row: dict) -> dict:
 
 
 def query_all(sql, params=()):
-    with db_cursor() as cur:
-        cur.execute(_prep(sql), params)
-        return [_normalize_row(dict(r)) for r in cur.fetchall()]
+    # Reads are always safe to retry: a SELECT has no side effects, so if a
+    # pooled connection turns out to be stale (e.g. Neon closed it after
+    # sitting idle), silently retrying once on a fresh connection is
+    # transparent to the caller and avoids a spurious crash.
+    for attempt in (1, 2):
+        conn = get_connection()
+        broken = False
+        try:
+            cur = conn.cursor()
+            cur.execute(_prep(sql), params)
+            return [_normalize_row(dict(r)) for r in cur.fetchall()]
+        except Exception as exc:
+            broken = True
+            if attempt == 1 and _is_stale_connection_error(exc):
+                continue
+            raise
+        finally:
+            _release_connection(conn, broken=broken)
 
 
 def query_one(sql, params=()):
-    with db_cursor() as cur:
-        cur.execute(_prep(sql), params)
-        row = cur.fetchone()
-        return _normalize_row(dict(row)) if row else None
+    for attempt in (1, 2):
+        conn = get_connection()
+        broken = False
+        try:
+            cur = conn.cursor()
+            cur.execute(_prep(sql), params)
+            row = cur.fetchone()
+            return _normalize_row(dict(row)) if row else None
+        except Exception as exc:
+            broken = True
+            if attempt == 1 and _is_stale_connection_error(exc):
+                continue
+            raise
+        finally:
+            _release_connection(conn, broken=broken)
 
 
 def execute(sql, params=()):
     """INSERT/UPDATE/DELETE - returns lastrowid (best-effort on Postgres:
     uses lastval(), which only succeeds if the statement just executed
-    touched a SERIAL/IDENTITY column - harmless None otherwise)."""
+    touched a SERIAL/IDENTITY column - harmless None otherwise).
+
+    Writes are not auto-retried on a stale connection (unlike the reads
+    above) - retrying a write after an ambiguous failure risks a double
+    write, so a genuinely dead connection here just raises clearly, same
+    as before pooling. Pooling still speeds up the common (non-stale)
+    case by reusing an already-authenticated connection."""
     conn = get_connection()
+    broken = False
     try:
         cur = conn.cursor()
         cur.execute(_prep(sql), params)
@@ -153,18 +237,25 @@ def execute(sql, params=()):
             lastrowid = cur.lastrowid
         conn.commit()
         return lastrowid
+    except Exception:
+        broken = True
+        raise
     finally:
-        conn.close()
+        _release_connection(conn, broken=broken)
 
 
 def executemany(sql, param_list):
     conn = get_connection()
+    broken = False
     try:
         cur = conn.cursor()
         cur.executemany(_prep(sql), param_list)
         conn.commit()
+    except Exception:
+        broken = True
+        raise
     finally:
-        conn.close()
+        _release_connection(conn, broken=broken)
 
 
 # ---------------------------------------------------------------------
@@ -512,7 +603,7 @@ def init_db():
             conn.executescript(schema)
             conn.commit()
     finally:
-        conn.close()
+        _release_connection(conn)
     _run_migrations()
 
 
