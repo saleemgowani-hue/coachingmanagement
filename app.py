@@ -81,7 +81,7 @@ def render_auth_screens():
             return
 
         if mode == "Sign In":
-            with st.form("login_form"):
+            with st.form("login_form", clear_on_submit=True):
                 st.markdown("### Login")
                 username = st.text_input("Username / Email")
                 password = st.text_input("Password", type="password")
