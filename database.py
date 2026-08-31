@@ -580,14 +580,35 @@ BUSINESS_DATA_TABLES_DELETE_ORDER = [t for t in ALL_TENANT_TABLES_DELETE_ORDER i
 
 def init_db():
     schema = SCHEMA_POSTGRES if BACKEND == "postgres" else SCHEMA_SQLITE
-    conn = get_connection()
-    try:
-        if BACKEND == "postgres":
+
+    if BACKEND != "postgres":
+        conn = get_connection()
+        try:
+            conn.executescript(schema)
+            conn.commit()
+        finally:
+            _release_connection(conn)
+        _run_migrations()
+        return
+
+    # Postgres: retried once on a fresh connection if the pooled connection
+    # handed out turns out to be dead (e.g. a serverless host like Neon
+    # closed it after sitting idle) - without this, a stale connection here
+    # crashed the whole app at boot instead of just reconnecting, since this
+    # runs on every Streamlit rerun and so hits the pool far more often than
+    # a typical query.
+    for attempt in (1, 2):
+        conn = get_connection()
+        broken = False
+        try:
             cur = conn.cursor()
-            try:
-                cur.execute(schema)
-                conn.commit()
-            except psycopg2.Error:
+            cur.execute(schema)
+            conn.commit()
+            break
+        except psycopg2.Error as exc:
+            broken = True
+            stale = _is_stale_connection_error(exc)
+            if not stale:
                 # Under concurrent Streamlit sessions, two processes can both
                 # run "CREATE TABLE/INDEX IF NOT EXISTS" for a brand-new
                 # table at the same instant - Postgres's system catalog
@@ -598,12 +619,16 @@ def init_db():
                 # desired end state (schema exists) is achieved either way -
                 # only possible on the very first-ever run, before any
                 # table exists; once schema exists this can never recur.
-                conn.rollback()
-        else:
-            conn.executescript(schema)
-            conn.commit()
-    finally:
-        _release_connection(conn)
+                try:
+                    conn.rollback()
+                except psycopg2.Error:
+                    pass  # connection is already dead - nothing to roll back
+        finally:
+            _release_connection(conn, broken=broken)
+
+        if not (stale and attempt == 1):
+            break
+
     _run_migrations()
 
 
