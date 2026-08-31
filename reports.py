@@ -84,21 +84,27 @@ def birthdays_upcoming(inst, days=7):
 
 
 def low_attendance_students(inst, threshold_pct=75, days=30):
+    # A single aggregated query instead of two SELECTs per active student -
+    # the previous per-student loop meant a coaching centre with hundreds of
+    # students issued hundreds of extra round trips just to render the
+    # dashboard, which is especially costly against a networked Postgres host.
     since = (date.today() - timedelta(days=days)).isoformat()
-    students = db.query_all("SELECT * FROM students WHERE institute_id=? AND status='ACTIVE'", (inst,))
+    rows = db.query_all(
+        """SELECT s.*,
+                  COUNT(a.attendance_id) AS total_marked,
+                  SUM(CASE WHEN a.status IN ('PRESENT','LATE') THEN 1 ELSE 0 END) AS present_count
+           FROM students s
+           JOIN attendance a ON a.student_id = s.student_id AND a.att_date >= ?
+           WHERE s.institute_id=? AND s.status='ACTIVE'
+           GROUP BY s.student_id""",
+        (since, inst))
     result = []
-    for s in students:
-        total = db.query_one(
-            "SELECT COUNT(*) c FROM attendance WHERE student_id=? AND att_date>=?",
-            (s["student_id"], since))["c"]
-        if total == 0:
-            continue
-        present = db.query_one(
-            "SELECT COUNT(*) c FROM attendance WHERE student_id=? AND att_date>=? AND status IN ('PRESENT','LATE')",
-            (s["student_id"], since))["c"]
+    for r in rows:
+        total = r["total_marked"]
+        present = r["present_count"] or 0
         pct = round((present / total) * 100, 1)
         if pct < threshold_pct:
-            row = dict(s)
+            row = dict(r)
             row["attendance_pct"] = pct
             result.append(row)
     return sorted(result, key=lambda x: x["attendance_pct"])
