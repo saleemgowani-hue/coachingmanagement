@@ -105,6 +105,8 @@ def low_attendance_students(inst, threshold_pct=75, days=30):
         pct = round((present / total) * 100, 1)
         if pct < threshold_pct:
             row = dict(r)
+            row.pop("total_marked", None)
+            row.pop("present_count", None)
             row["attendance_pct"] = pct
             result.append(row)
     return sorted(result, key=lambda x: x["attendance_pct"])
