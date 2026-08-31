@@ -7,10 +7,15 @@ Every row this module inserts is also logged into `demo_data_log`
 those rows later - regardless of how much real data has been added
 in the meantime - without ever touching genuine student/course/fee
 records.
+
+The same demo_data_log split is also what `clear_stale_real_data()`
+below uses to auto-expire real data a visitor types into the shared
+demo account (see its docstring) while leaving the seeded sample
+dataset alone.
 """
 
 import random
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import database as db
 import utils
@@ -192,4 +197,57 @@ def clear_demo_data(institute_id: str) -> int:
             removed += 1
 
     db.execute("DELETE FROM demo_data_log WHERE institute_id=?", (institute_id,))
+    return removed
+
+
+# Tables a demo visitor can type real data into, oldest-child-first (same
+# ordering concern as CLEAR_ORDER above), each with its own row-timestamp
+# column - checked against demo_data_log to tell "seeded sample row" (keep
+# forever) from "someone's own row" (expire after STALE_DATA_HOURS).
+STALE_DATA_TABLES = [
+    ("fee_payments", "payment_id", "created_at"),
+    ("admissions", "admission_id", "created_at"),
+    ("attendance", "attendance_id", "marked_at"),
+    ("test_results", "result_id", "created_at"),
+    ("class_schedule", "schedule_id", "created_at"),
+    ("students", "student_id", "created_at"),
+    ("tests", "test_id", "created_at"),
+    ("batches", "batch_id", "created_at"),
+    ("faculty", "faculty_id", "created_at"),
+    ("courses", "course_id", "created_at"),
+]
+
+STALE_DATA_HOURS = 6
+
+
+def clear_stale_real_data(institute_id: str, hours: int = STALE_DATA_HOURS) -> int:
+    """Auto-expires real data someone types into the SHARED demo account.
+
+    The demo login is a single fixed tenant every visitor explores under
+    the same institute_id, with a permanent licence (see license.py) - so
+    without this, real names/phone numbers/fees one visitor enters would
+    sit there indefinitely, visible to every other person who signs in
+    with the same public demo/<password>. This keeps the seeded sample
+    dataset (rows logged in demo_data_log by generate() above) forever,
+    and deletes everything else in these tables once it's older than
+    `hours`. Returns the number of rows removed.
+
+    Never call this with a real customer's institute_id - it is only
+    ever meant to run against the fixed is_demo=1 tenant."""
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    removed = 0
+    for table_name, pk_col, ts_col in STALE_DATA_TABLES:
+        seeded_ids = {
+            r["record_id"] for r in db.query_all(
+                "SELECT record_id FROM demo_data_log WHERE institute_id=? AND table_name=?",
+                (institute_id, table_name))
+        }
+        rows = db.query_all(
+            f"SELECT {pk_col} AS pk FROM {table_name} WHERE institute_id=? AND {ts_col} <= ?",
+            (institute_id, cutoff))
+        for r in rows:
+            if str(r["pk"]) in seeded_ids:
+                continue
+            db.execute(f"DELETE FROM {table_name} WHERE {pk_col} = ?", (r["pk"],))
+            removed += 1
     return removed

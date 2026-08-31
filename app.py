@@ -48,6 +48,21 @@ def _run_startup_tasks():
 _run_startup_tasks()
 
 
+@st.cache_resource(ttl=3600)
+def _run_demo_data_cleanup():
+    # Re-checked at most once an hour (Streamlit re-runs this once the
+    # cached value's TTL expires) rather than on every rerun. Looks up the
+    # fixed demo institute itself rather than accepting one as an argument,
+    # so this can never be pointed at a real customer's data by mistake -
+    # see sample_data.clear_stale_real_data() for why this exists.
+    demo_inst = db.query_one("SELECT institute_id FROM institutes WHERE is_demo=1 LIMIT 1")
+    if demo_inst:
+        sample_data.clear_stale_real_data(demo_inst["institute_id"])
+
+
+_run_demo_data_cleanup()
+
+
 def load_css():
     css_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "style.css")
     with open(css_path) as f:
