@@ -31,9 +31,21 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-db.init_db()
-wa.ensure_default_templates_for_all_institutes()
-auth.ensure_demo_account()
+@st.cache_resource
+def _run_startup_tasks():
+    # These are one-time, process-wide setup (schema DDL, template/demo-
+    # account backfills) - idempotent, but not free. Without caching,
+    # Streamlit was re-running all three DB round trips on every single
+    # rerun (i.e. every click/input from every user), which was both a
+    # major source of the app's overall slowness and, on Postgres, put
+    # enough load on the connection pool to occasionally hand out a
+    # stale/dead connection and crash app boot.
+    db.init_db()
+    wa.ensure_default_templates_for_all_institutes()
+    auth.ensure_demo_account()
+
+
+_run_startup_tasks()
 
 
 def load_css():
@@ -69,7 +81,7 @@ def render_auth_screens():
             return
 
         if mode == "Sign In":
-            with st.form("login_form"):
+            with st.form("login_form", clear_on_submit=True):
                 st.markdown("### Login")
                 username = st.text_input("Username / Email")
                 password = st.text_input("Password", type="password")

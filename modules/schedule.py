@@ -54,9 +54,6 @@ def render():
                     if r["topic"]:
                         st.caption(f"Topic: {r['topic']}")
                 with c3:
-                    students = db.query_all(
-                        "SELECT whatsapp_number FROM students WHERE batch_id=(SELECT batch_id FROM class_schedule WHERE schedule_id=?) AND status='ACTIVE' LIMIT 1",
-                        (r["schedule_id"],))
                     st.caption("Use WhatsApp Centre to notify the full batch")
                 st.divider()
             df = pd.DataFrame(rows)

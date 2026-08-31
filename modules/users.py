@@ -5,12 +5,14 @@ import pandas as pd
 
 import database as db
 import utils
+import auth
 from auth import current_user, hash_password
 
 
 def render():
     user = current_user()
     inst = user["institute_id"]
+    is_demo = auth.is_demo()
     st.markdown("## 👥 User Management")
 
     if user["role"] != "ADMIN":
@@ -25,26 +27,35 @@ def render():
             (inst,)))
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-        st.markdown("#### Update Role / Status")
-        editable = df[df["username"] != user["username"]]
-        if editable.empty:
-            st.caption("No other users to manage yet.")
+        if is_demo:
+            st.info("🔒 This is the demo account — adding staff users or changing roles is disabled "
+                    "here, since it's a single account shared by everyone exploring the demo. "
+                    "Sign up for your own account to manage staff.")
         else:
-            sel = st.selectbox("Select user", editable["username"].tolist())
-            row = editable[editable["username"] == sel].iloc[0]
-            with st.form("edit_user"):
-                role = st.selectbox("Role", ["ADMIN", "MANAGER", "STAFF"],
-                                    index=["ADMIN", "MANAGER", "STAFF"].index(row["role"]))
-                status = st.selectbox("Status", ["ACTIVE", "DISABLED"],
-                                      index=0 if row["status"] == "ACTIVE" else 1)
-                save = st.form_submit_button("💾 Update")
-            if save:
-                db.execute("UPDATE users SET role=?, status=? WHERE user_id=? AND institute_id=?",
-                          (role, status, int(row["user_id"]), inst))
-                utils.toast_success("User updated.")
-                st.rerun()
+            st.markdown("#### Update Role / Status")
+            editable = df[df["username"] != user["username"]]
+            if editable.empty:
+                st.caption("No other users to manage yet.")
+            else:
+                sel = st.selectbox("Select user", editable["username"].tolist())
+                row = editable[editable["username"] == sel].iloc[0]
+                with st.form("edit_user"):
+                    role = st.selectbox("Role", ["ADMIN", "MANAGER", "STAFF"],
+                                        index=["ADMIN", "MANAGER", "STAFF"].index(row["role"]))
+                    status = st.selectbox("Status", ["ACTIVE", "DISABLED"],
+                                          index=0 if row["status"] == "ACTIVE" else 1)
+                    save = st.form_submit_button("💾 Update")
+                if save:
+                    db.execute("UPDATE users SET role=?, status=? WHERE user_id=? AND institute_id=?",
+                              (role, status, int(row["user_id"]), inst))
+                    utils.toast_success("User updated.")
+                    st.rerun()
 
     with tabs[1]:
+        if is_demo:
+            st.info("🔒 This is the demo account — creating new staff users is disabled here. "
+                    "Sign up for your own account to add staff.")
+            return
         with st.form("add_user", clear_on_submit=True):
             full_name = st.text_input("Full Name *")
             username = st.text_input("Username *")
